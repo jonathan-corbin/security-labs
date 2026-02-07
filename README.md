@@ -1,17 +1,8 @@
-# Security Labs
+# Security Research & Lab Notes
 
-A collection of structured technical walkthroughs and lab notes based on hands-on practice in controlled environments.
+This repository documents my hands-on learning in cybersecurity through 
+controlled labs, public training platforms, and technical experimentation.
 
-## What’s in this repo
-- `writeups/` — Hack The Box walkthroughs (one folder per box)
-- Clear, repeatable format for each lab  
-- Screenshots and evidence where useful
+The goal is to deepen my understanding of how systems are attacked and defended.
 
-## Structure
-Each box follows the same pattern:
-- Overview  
-- Enumeration  
-- Initial Access  
-- Post-Exploitation  
-- Privilege Escalation  
-- Lessons Learned
+All work is performed in legal, authorized environments.
